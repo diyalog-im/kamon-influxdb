@@ -7,35 +7,45 @@ import kamon.util.EnvironmentTagBuilder
 import kamon.{Kamon, MetricReporter}
 import okhttp3.{MediaType, OkHttpClient, Request, RequestBody, Authenticator, Route, Response, Credentials}
 import org.slf4j.LoggerFactory
+import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
 
 import scala.util.Try
 
 class InfluxDBReporter(config: Config = Kamon.config()) extends MetricReporter {
   private val logger = LoggerFactory.getLogger(classOf[InfluxDBReporter])
   private var settings = InfluxDBReporter.readSettings(config)
-  private val client = buildClient(settings)
+  private val client : Either[OkHttpClient, KafkaProducer[String,String]] = buildClient(settings)
 
   override def reportPeriodSnapshot(snapshot: PeriodSnapshot): Unit = {
-    val request = new Request.Builder()
-      .url(settings.url)
-      .post(translateToLineProtocol(snapshot))
-      .build()
 
     Try {
-      val response = client.newCall(request).execute()
-      if(response.isSuccessful())
-        logger.trace("Successfully sent metrics to InfluxDB")
-      else {
-        logger.error("Metrics POST to InfluxDB failed with status code [{}], response body: {}",
-          response.code(),
-          response.body().string())
-      }
+      client match {
+        case Right(kafkaClient) =>
 
-      response.close()
+            val data = new ProducerRecord[String, String](settings.kafkaSettings.get.topic, settings.kafkaSettings.get.key, createData(snapshot))
+            kafkaClient.send(data)
 
+        case Left(httpClient) =>
+          val request = new Request.Builder()
+            .url(settings.url)
+            .post(translateToLineProtocol(snapshot))
+            .build()
+
+            val response = httpClient.newCall(request).execute()
+            if(response.isSuccessful())
+              logger.trace("Successfully sent metrics to InfluxDB")
+            else {
+              logger.error("Metrics POST to InfluxDB failed with status code [{}], response body: {}",
+                response.code(),
+                response.body().string())
+            }
+
+            response.close()
+        }
     }.failed.map {
       error => logger.error("Failed to POST metrics to InfluxDB", error)
     }
+
   }
 
 
@@ -48,6 +58,10 @@ class InfluxDBReporter(config: Config = Kamon.config()) extends MetricReporter {
   }
 
   private def translateToLineProtocol(periodSnapshot: PeriodSnapshot): RequestBody = {
+    RequestBody.create(MediaType.parse("text/plain"), createData(periodSnapshot))
+  }
+
+  private def createData(periodSnapshot : PeriodSnapshot) : String = {
     import periodSnapshot.metrics._
     val builder = StringBuilder.newBuilder
 
@@ -56,7 +70,7 @@ class InfluxDBReporter(config: Config = Kamon.config()) extends MetricReporter {
     histograms.foreach(h => writeMetricDistribution(builder, h, settings.percentiles, periodSnapshot.to.getEpochSecond))
     rangeSamplers.foreach(rs => writeMetricDistribution(builder, rs, settings.percentiles, periodSnapshot.to.getEpochSecond))
 
-    RequestBody.create(MediaType.parse("text/plain"), builder.result())
+    builder.result()
   }
 
   private def writeMetricValue(builder: StringBuilder, metric: MetricValue, fieldName: String, timestamp: Long): Unit = {
@@ -80,8 +94,13 @@ class InfluxDBReporter(config: Config = Kamon.config()) extends MetricReporter {
   }
 
   private def writeNameAndTags(builder: StringBuilder, name: String, metricTags: Map[String, String]): Unit = {
-    builder
-      .append(name)
+    val convertedName =
+      if (settings.prefix != "")
+        s"${settings.prefix}_" + name.replace('.','_')
+      else
+        builder.append(name.replace('.','_'))
+
+    builder.append(convertedName)
 
     val tags = if(settings.additionalTags.nonEmpty) metricTags ++ settings.additionalTags else metricTags
 
@@ -132,23 +151,51 @@ class InfluxDBReporter(config: Config = Kamon.config()) extends MetricReporter {
       .append("\n")
   }
 
-  protected def buildClient(settings: Settings): OkHttpClient = {
-    val basicBuilder = new OkHttpClient.Builder()
-    val authenticator = settings.credentials.map(credentials => new Authenticator() {
-      def authenticate(route: Route, response: Response): Request = {
-        response.request().newBuilder().header("Authorization", credentials).build()
-      }
-    })
-    authenticator.foldLeft(basicBuilder){ case (builder, auth) => builder.authenticator(auth)}.build()
+  protected def buildClient(settings: Settings): Either[OkHttpClient, KafkaProducer[String, String]] = {
+
+    if (settings.kafkaEnabled){
+      import java.util.Properties
+
+      val props = new Properties()
+      props.put("bootstrap.servers", settings.kafkaSettings.get.broker)
+      props.put("client.id", "KamonInfluxDbKafkaPlugin")
+      props.put("reconnect.backoff.ms", Int.box(10000))
+      props.put("retry.backoff.ms", Int.box(10000))
+      props.put("max.request.size", Int.box(settings.kafkaSettings.get.maxReqSize))
+      props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer")
+      props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer")
+      Right(new KafkaProducer[String, String](props))
+    }
+    else{
+      val basicBuilder = new OkHttpClient.Builder()
+      val authenticator = settings.credentials.map(credentials => new Authenticator() {
+        def authenticate(route: Route, response: Response): Request = {
+          response.request().newBuilder().header("Authorization", credentials).build()
+        }
+      })
+      Left(authenticator.foldLeft(basicBuilder){ case (builder, auth) => builder.authenticator(auth)}.build())
+    }
+
   }
 }
 
 object InfluxDBReporter {
+
+  case class KafkaSettings(
+    broker : String,
+    topic : String,
+    key : String,
+    maxReqSize : Int
+  )
+
   case class Settings(
     url: String,
     percentiles: Seq[Double],
     credentials: Option[String],
-    additionalTags: Map[String, String]
+    additionalTags: Map[String, String],
+    kafkaEnabled : Boolean,
+    kafkaSettings : Option[KafkaSettings],
+    prefix : String = ""
   )
 
   def readSettings(config: Config): Settings = {
@@ -164,11 +211,25 @@ object InfluxDBReporter {
 
     val additionalTags = EnvironmentTagBuilder.create(root.getConfig("additional-tags"))
 
+    val prefix : String = root.getString("prefix")
+
+    val kafkaEnabled = root.getBoolean("kafka_enabled")
+    val kafka = Try(root.getConfig("kafka"))
+    val kafkaSettings = for {
+      broker ← Try(kafka.get.getString("broker"))
+      topic ← Try(kafka.get.getString("topic"))
+      key ← Try(kafka.get.getString("key"))
+      maxReqSize <- Try(kafka.get.getInt("max-request-size"))
+    } yield KafkaSettings(broker,topic,key,maxReqSize)
+
     Settings(
       url,
       root.getDoubleList("percentiles").asScala.map(_.toDouble),
       credentials,
-      additionalTags
+      additionalTags,
+      kafkaEnabled,
+      kafkaSettings.toOption,
+      prefix
     )
   }
 }

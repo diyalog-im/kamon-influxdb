@@ -17,11 +17,15 @@ val kamonCore        = "io.kamon"             %% "kamon-core"    % "1.1.3"
 val kamonTestkit     = "io.kamon"             %% "kamon-testkit" % "1.1.3"
 val okHttp           = "com.squareup.okhttp3" %  "okhttp"        % "3.9.1"
 val okHttpMockServer = "com.squareup.okhttp3" %  "mockwebserver" % "3.9.1"
+val kafka            = "org.apache.kafka"     % "kafka-clients"  % "0.9.0.0"
+
 
 name := "kamon-influxdb"
 
+scalaVersion := "2.11.8"
+
 libraryDependencies ++=
-  compileScope(kamonCore, okHttp) ++
-  testScope(scalatest, kamonTestkit, okHttpMockServer, slf4jApi, slf4jnop)
+  compileScope(kamonCore, okHttp, kafka) ++
+  testScope(scalatest, kamonTestkit, okHttpMockServer, kafka, slf4jApi, slf4jnop)
 
 resolvers += Resolver.bintrayRepo("kamon-io", "releases")
