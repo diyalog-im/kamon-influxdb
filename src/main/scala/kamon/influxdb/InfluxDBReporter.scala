@@ -1,11 +1,13 @@
 package kamon.influxdb
 
+import java.time.Instant
+
 import com.typesafe.config.Config
 import kamon.influxdb.InfluxDBReporter.Settings
 import kamon.metric.{MetricDistribution, MetricValue, PeriodSnapshot}
 import kamon.util.EnvironmentTagBuilder
 import kamon.{Kamon, MetricReporter}
-import okhttp3.{MediaType, OkHttpClient, Request, RequestBody, Authenticator, Route, Response, Credentials}
+import okhttp3.{Authenticator, Credentials, MediaType, OkHttpClient, Request, RequestBody, Response, Route}
 import org.slf4j.LoggerFactory
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
 
@@ -61,14 +63,16 @@ class InfluxDBReporter(config: Config = Kamon.config()) extends MetricReporter {
     RequestBody.create(MediaType.parse("text/plain"), createData(periodSnapshot))
   }
 
+  private def getTimeInNanoSecond(timestamp : Instant) : Long  = timestamp.getEpochSecond * 1000000000L + timestamp.getNano
+
   private def createData(periodSnapshot : PeriodSnapshot) : String = {
     import periodSnapshot.metrics._
     val builder = StringBuilder.newBuilder
 
-    counters.foreach(c => writeMetricValue(builder, c, "count", periodSnapshot.to.getEpochSecond))
-    gauges.foreach(g => writeMetricValue(builder, g, "value", periodSnapshot.to.getEpochSecond))
-    histograms.foreach(h => writeMetricDistribution(builder, h, settings.percentiles, periodSnapshot.to.getEpochSecond))
-    rangeSamplers.foreach(rs => writeMetricDistribution(builder, rs, settings.percentiles, periodSnapshot.to.getEpochSecond))
+    counters.foreach(c => writeMetricValue(builder, c, "count", getTimeInNanoSecond(periodSnapshot.to)))
+    gauges.foreach(g => writeMetricValue(builder, g, "value", getTimeInNanoSecond(periodSnapshot.to)))
+    histograms.foreach(h => writeMetricDistribution(builder, h, settings.percentiles, getTimeInNanoSecond(periodSnapshot.to)))
+    rangeSamplers.foreach(rs => writeMetricDistribution(builder, rs, settings.percentiles, getTimeInNanoSecond(periodSnapshot.to)))
 
     builder.result()
   }
