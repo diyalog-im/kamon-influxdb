@@ -22,7 +22,7 @@ val kafka            = "org.apache.kafka"     % "kafka-clients"  % "0.9.0.0"
 
 name := "kamon-influxdb"
 
-scalaVersion := "2.11.8"
+scalaVersion := "2.12.17"
 
 libraryDependencies ++=
   compileScope(kamonCore, okHttp, kafka) ++
