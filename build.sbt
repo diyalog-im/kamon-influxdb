@@ -29,3 +29,14 @@ libraryDependencies ++=
   testScope(scalatest, kamonTestkit, okHttpMockServer, kafka, slf4jApi, slf4jnop)
 
 resolvers += Resolver.bintrayRepo("kamon-io", "releases")
+
+publishArtifact in (Compile, packageSrc) := false
+publishMavenStyle := true
+credentials += Credentials(Path.userHome / ".m2" / ".credentials")
+publishTo := {
+  val nexus = "http://mavenrepo.diyalog.im:18081"
+  if (isSnapshot.value)
+    Some("releases"  at nexus + "/repository/maven-snapshots/")
+  else
+  Some("snapshots" at nexus + "/repository/maven-releases/")
+}
