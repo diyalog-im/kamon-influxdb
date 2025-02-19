@@ -34,7 +34,7 @@ publishArtifact in (Compile, packageSrc) := false
 publishMavenStyle := true
 credentials += Credentials(Path.userHome / ".m2" / ".credentials")
 publishTo := {
-  val nexus = "http://mavenrepo.diyalog.im:18081"
+  val nexus = "https://mavenrepo.diyalog.im"
   if (isSnapshot.value)
     Some("releases"  at nexus + "/repository/maven-snapshots/")
   else
